@@ -38,6 +38,12 @@ app.get('/', (req, res) => {
   res.send('Hire loop is looping')
 })
 
+app.get('/tutions', async (req, res) => {
+  const cursor = tutions.find()
+  const result = await cursor.toArray()
+  res.send(result)
+})
+
 app.post('/tutions', async (req, res) => {
   const tution = req.body
   const result = await tutions.insertOne(tution)
