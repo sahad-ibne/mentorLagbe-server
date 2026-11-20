@@ -57,6 +57,29 @@ app.delete('/tutions/:id', async (req, res) => {
   res.send(result)
 })
 
+app.patch('/tutions/:id', async (req, res) => {
+  try {
+    const id = req.params.id
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid tuition ID' })
+    }
+
+    const filter = { _id: new ObjectId(id) }
+    const updateDoc = {
+      $set: {
+        ...req.body,
+        updatedAt: new Date()
+      }
+    }
+
+    const result = await tutions.updateOne(filter, updateDoc)
+    res.json(result)
+  } catch (error) {
+    console.error('Update tuition error:', error)
+    res.status(500).json({ message: 'Failed to update tuition' })
+  }
+})
+
 app.listen(port, () => {
   console.log(`Hire loop is running on port ${port}`)
 })
