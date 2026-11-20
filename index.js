@@ -1,7 +1,7 @@
 import express from 'express'
 import cors from 'cors'
 import 'dotenv/config'
-import { MongoClient } from 'mongodb'
+import { MongoClient, ObjectId } from 'mongodb'
 
 const app = express()
 const port = process.env.PORT || 5000
@@ -47,6 +47,13 @@ app.get('/tutions', async (req, res) => {
 app.post('/tutions', async (req, res) => {
   const tution = req.body
   const result = await tutions.insertOne(tution)
+  res.send(result)
+})
+
+app.delete('/tutions/:id', async (req, res) => {
+  const id = req.params.id
+  const query = { _id: new ObjectId(id) }
+  const result = await tutions.deleteOne(query)
   res.send(result)
 })
 
