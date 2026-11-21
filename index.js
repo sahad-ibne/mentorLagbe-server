@@ -27,6 +27,7 @@ const connectedClient = await connectToMongoDB()
 const database = connectedClient.db('mentorLagbe')
 const users = database.collection('user')
 const tutions = database.collection('tution')
+const applications = database.collection('applications')
 
 app.get('/users', async (req, res) => {
   const cursor = users.find({})
@@ -78,6 +79,13 @@ app.delete('/tutions/:id', async (req, res) => {
   const id = req.params.id
   const query = { _id: new ObjectId(id) }
   const result = await tutions.deleteOne(query)
+  res.send(result)
+})
+
+// application related api
+app.post('/applications', async (req, res) => {
+  const application = req.body
+  const result = await application.insertOne(application)
   res.send(result)
 })
 
