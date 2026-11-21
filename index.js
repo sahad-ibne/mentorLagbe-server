@@ -39,8 +39,32 @@ app.get('/', (req, res) => {
 })
 
 app.get('/tutions', async (req, res) => {
-  const cursor = tutions.find()
+  const query = {}
+
+  if (req.query.subject) {
+    query.subject = {
+      $regex: req.query.subject,
+      $options: 'i'
+    }
+  }
+
+  if (req.query.classLevel) {
+    query.classLevel = {
+      $regex: req.query.classLevel,
+      $options: 'i'
+    }
+  }
+
+  if (req.query.mode) {
+    query.mode = {
+      $regex: `^${req.query.mode}$`,
+      $options: 'i'
+    }
+  }
+
+  const cursor = tutions.find(query)
   const result = await cursor.toArray()
+
   res.send(result)
 })
 
