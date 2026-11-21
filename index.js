@@ -84,8 +84,28 @@ app.delete('/tutions/:id', async (req, res) => {
 
 // application related api
 app.post('/applications', async (req, res) => {
-  const application = req.body
-  const result = await application.insertOne(application)
+  const newApplication = {
+    ...req.body,
+    status: 'pending',
+    createdAt: new Date()
+  }
+  const result = await applications.insertOne(newApplication)
+  res.send(result)
+})
+
+app.get('/applications', async (req, res) => {
+  const query = {}
+  if (req.query.email) {
+    query.studentEmail = req.query.email
+  }
+  const result = await applications.find(query).toArray()
+  res.send(result)
+})
+
+app.delete('/applications/:id', async (req, res) => {
+  const id = req.params.id
+  const query = { _id: new ObjectId(id) }
+  const result = await applications.deleteOne(query)
   res.send(result)
 })
 
