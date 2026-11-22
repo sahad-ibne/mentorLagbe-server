@@ -809,3 +809,5 @@ app.patch('/tutions/:id', verifyToken, verifyTutor, async (req, res) => {
 app.listen(port, () => {
   console.log(`Hire loop is running on port ${port}`)
 })
+
+export default app
