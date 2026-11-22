@@ -71,7 +71,26 @@ app.get('/tutions', async (req, res) => {
 
 app.post('/tutions', async (req, res) => {
   const tution = req.body
-  const result = await tutions.insertOne(tution)
+  const tutorEmail = tution.tutorEmail || tution.email
+
+  if (tutorEmail) {
+    const count = await tutions.countDocuments({
+      $or: [{ tutorEmail: tutorEmail }, { email: tutorEmail }]
+    })
+
+    if (count >= 2) {
+      return res.status(403).send({
+        message: 'You can post a maximum of 2 tuitions.'
+      })
+    }
+  }
+
+  const newTution = {
+    ...tution,
+    createdAt: new Date()
+  }
+
+  const result = await tutions.insertOne(newTution)
   res.send(result)
 })
 
