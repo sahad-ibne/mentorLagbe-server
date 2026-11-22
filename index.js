@@ -48,6 +48,18 @@ const isValidInternalApiSecret = providedSecret => {
   )
 }
 
+const requireInternalApiSecret = (req, res, next) => {
+  if (!process.env.INTERNAL_API_SECRET) {
+    return res.status(503).json({
+      message: 'Internal API authentication is not configured.'
+    })
+  }
+  if (!isValidInternalApiSecret(req.get('x-internal-api-secret'))) {
+    return res.status(401).json({ message: 'Unauthorized' })
+  }
+  next()
+}
+
 app.get('/users', async (req, res) => {
   const cursor = users.find({})
   const result = await cursor.toArray()
@@ -58,16 +70,107 @@ app.get('/', (req, res) => {
   res.send('Hire loop is looping')
 })
 
-app.patch('/users/:id/role', async (req, res) => {
-  const id = req.params.id
-  const query = { _id: new ObjectId(id) }
-  const updateDoc = {
-    $set: {
-      role: req.body.role
+app.patch('/users/:id/role', requireInternalApiSecret, async (req, res) => {
+  try {
+    const { id } = req.params
+    const { role } = req.body || {}
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid user ID.' })
     }
+    if (!['student', 'tutor', 'admin'].includes(role)) {
+      return res.status(400).json({ message: 'Invalid role.' })
+    }
+
+    const result = await users.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { role, updatedAt: new Date() } }
+    )
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ message: 'User not found.' })
+    }
+
+    res.json({ success: true, role })
+  } catch (error) {
+    console.error('Update user role error:', error)
+    res.status(500).json({ message: 'Could not update user role.' })
   }
-  const result = await users.updateOne(query, updateDoc)
-  res.send(result)
+})
+
+app.get('/payments', requireInternalApiSecret, async (req, res) => {
+  try {
+    const records = await payments.find({}).sort({ createdAt: -1 }).toArray()
+    const completeRecords = await Promise.all(
+      records.map(async payment => {
+        if (typeof payment.amountTotal === 'number' || !payment.sessionId) {
+          return payment
+        }
+
+        const checkoutSession = await stripe.checkout.sessions.retrieve(
+          payment.sessionId
+        )
+        const stripeDetails = {
+          amountTotal: checkoutSession.amount_total,
+          currency: checkoutSession.currency || 'usd',
+          transactionId:
+            typeof checkoutSession.payment_intent === 'string'
+              ? checkoutSession.payment_intent
+              : checkoutSession.payment_intent?.id || null,
+          paymentDate: checkoutSession.created
+            ? new Date(checkoutSession.created * 1000)
+            : payment.paymentDate || payment.createdAt || null
+        }
+
+        await payments.updateOne(
+          { _id: payment._id },
+          { $set: stripeDetails }
+        )
+        return { ...payment, ...stripeDetails }
+      })
+    )
+
+    const userIds = [
+      ...new Set(
+        completeRecords
+          .map(payment => String(payment.userId || ''))
+          .filter(id => ObjectId.isValid(id))
+      )
+    ].map(id => new ObjectId(id))
+
+    const paymentUsers = userIds.length
+      ? await users.find({ _id: { $in: userIds } }).toArray()
+      : []
+    const usersById = new Map(
+      paymentUsers.map(user => [user._id.toString(), user])
+    )
+
+    res.json({
+      payments: completeRecords.map(payment => {
+        const user = usersById.get(String(payment.userId || ''))
+        return {
+          _id: payment._id.toString(),
+          userName: payment.userName || user?.name || '',
+          email:
+            payment.email || payment.customer_email || user?.email || '',
+          role: payment.role || user?.role || 'tutor',
+          planName: payment.planName || payment.plan || 'Pro',
+          amountTotal: payment.amountTotal ?? null,
+          currency: payment.currency || 'usd',
+          transactionId:
+            payment.transactionId ||
+            payment.payment_intent ||
+            payment.sessionId ||
+            '',
+          sessionId: payment.sessionId || '',
+          paymentDate: payment.paymentDate || payment.createdAt || null
+        }
+      })
+    })
+  } catch (error) {
+    console.error('Load payments error:', error)
+    res.status(500).json({ message: 'Could not load payments.' })
+  }
 })
 
 app.get('/tutions', async (req, res) => {
@@ -204,7 +307,9 @@ app.post('/payments/checkout-verify', async (req, res) => {
       email: normalizedEmail,
       role: 'tutor'
     }
-    const user = await users.findOne(userQuery, { projection: { _id: 1 } })
+    const user = await users.findOne(userQuery, {
+      projection: { _id: 1, name: 1, email: 1, role: 1 }
+    })
     if (!user) {
       return res.status(404).json({
         success: false,
@@ -216,6 +321,19 @@ app.post('/payments/checkout-verify', async (req, res) => {
       sessionId,
       status: checkoutSession.status,
       payment_status: checkoutSession.payment_status,
+      userName: user.name || '',
+      email: normalizedEmail,
+      role: 'tutor',
+      planName: 'Pro',
+      amountTotal: checkoutSession.amount_total,
+      currency: checkoutSession.currency || 'usd',
+      transactionId:
+        typeof checkoutSession.payment_intent === 'string'
+          ? checkoutSession.payment_intent
+          : checkoutSession.payment_intent?.id || null,
+      paymentDate: checkoutSession.created
+        ? new Date(checkoutSession.created * 1000)
+        : new Date(),
       customer_email:
         checkoutSession.customer_details?.email ||
         checkoutSession.customer_email ||
@@ -306,6 +424,46 @@ app.delete('/applications/:id', async (req, res) => {
   res.send(result)
 })
 
+app.patch(
+  '/tutions/:id/approval',
+  requireInternalApiSecret,
+  async (req, res) => {
+    try {
+      const { id } = req.params
+      const { approvalStatus } = req.body || {}
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ message: 'Invalid tuition ID.' })
+      }
+      if (!['approved', 'rejected'].includes(approvalStatus)) {
+        return res
+          .status(400)
+          .json({ message: 'Status must be approved or rejected.' })
+      }
+
+      const result = await tutions.updateOne(
+        { _id: new ObjectId(id) },
+        {
+          $set: {
+            approvalStatus,
+            isActive: approvalStatus === 'approved',
+            updatedAt: new Date()
+          }
+        }
+      )
+
+      if (result.matchedCount === 0) {
+        return res.status(404).json({ message: 'Tuition not found.' })
+      }
+
+      res.json({ success: true, approvalStatus })
+    } catch (error) {
+      console.error('Update tuition approval error:', error)
+      res.status(500).json({ message: 'Could not update tuition approval.' })
+    }
+  }
+)
+
 app.patch('/tutions/:id', async (req, res) => {
   try {
     const id = req.params.id
@@ -314,9 +472,30 @@ app.patch('/tutions/:id', async (req, res) => {
     }
 
     const filter = { _id: new ObjectId(id) }
+    const allowedFields = [
+      'title',
+      'subject',
+      'classLevel',
+      'mode',
+      'location',
+      'monthlyFee',
+      'daysPerWeek',
+      'description',
+      'status',
+      'isActive'
+    ]
+    const update = Object.fromEntries(
+      Object.entries(req.body || {}).filter(([key]) =>
+        allowedFields.includes(key)
+      )
+    )
+    if (Object.keys(update).length === 0) {
+      return res.status(400).json({ message: 'No editable fields provided.' })
+    }
+
     const updateDoc = {
       $set: {
-        ...req.body,
+        ...update,
         updatedAt: new Date()
       }
     }
