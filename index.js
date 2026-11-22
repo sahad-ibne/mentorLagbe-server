@@ -6,6 +6,10 @@ import { MongoClient, ObjectId } from 'mongodb'
 import Stripe from 'stripe'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY)
+const tutorProPriceId =
+  process.env.STRIPE_PRO_PRICE_ID || 'price_1UeV9Z9pnCvIG9dFoAJZUfQ7'
+const studentProPriceId =
+  process.env.STRIPE_STUDENT_PRO_PRICE_ID || 'price_1UebKQ9pnCvIG9dFKZlN01S5'
 
 const app = express()
 const port = process.env.PORT || 5000
@@ -68,6 +72,40 @@ app.get('/users', async (req, res) => {
 
 app.get('/', (req, res) => {
   res.send('Hire loop is looping')
+})
+
+app.get('/platform-stats', async (req, res) => {
+  try {
+    const [verifiedStudents, verifiedTutors, activeTuitions] =
+      await Promise.all([
+        users.countDocuments({ role: 'student', emailVerified: true }),
+        users.countDocuments({ role: 'tutor', emailVerified: true }),
+        tutions.countDocuments({
+          approvalStatus: 'approved',
+          isActive: true
+        })
+      ])
+
+    res.json({ verifiedStudents, verifiedTutors, activeTuitions })
+  } catch (error) {
+    console.error('Load platform statistics error:', error)
+    res.status(500).json({ message: 'Could not load platform statistics.' })
+  }
+})
+
+app.get('/tutions/featured', async (req, res) => {
+  try {
+    const featuredTuitions = await tutions
+      .find({ approvalStatus: 'approved', isActive: true })
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(6)
+      .toArray()
+
+    res.json(featuredTuitions)
+  } catch (error) {
+    console.error('Load featured tuitions error:', error)
+    res.status(500).json({ message: 'Could not load featured tuitions.' })
+  }
 })
 
 app.patch('/users/:id/role', requireInternalApiSecret, async (req, res) => {
@@ -277,7 +315,7 @@ app.post('/payments/checkout-verify', async (req, res) => {
   ) {
     return res.status(400).json({
       success: false,
-      message: 'Session ID and valid tutor account details are required.'
+      message: 'Session ID and valid account details are required.'
     })
   }
 
@@ -285,16 +323,34 @@ app.post('/payments/checkout-verify', async (req, res) => {
     const checkoutSession = await stripe.checkout.sessions.retrieve(sessionId)
     const metadata = checkoutSession.metadata || {}
     const normalizedEmail = email.trim().toLowerCase()
+    const userRole = metadata.userRole
+    const expectedPriceId =
+      userRole === 'student'
+        ? studentProPriceId
+        : userRole === 'tutor'
+          ? tutorProPriceId
+          : null
+    const lineItems = await stripe.checkout.sessions.listLineItems(sessionId, {
+      limit: 2
+    })
+    const purchasedPriceId =
+      lineItems.data.length === 1
+        ? typeof lineItems.data[0].price === 'string'
+          ? lineItems.data[0].price
+          : lineItems.data[0].price?.id
+        : null
 
     if (
       checkoutSession.status !== 'complete' ||
       checkoutSession.payment_status !== 'paid' ||
       checkoutSession.mode !== 'payment' ||
-      metadata.userRole !== 'tutor' ||
+      !expectedPriceId ||
       metadata.plan !== 'pro' ||
       metadata.userId !== userId ||
       metadata.userEmail?.toLowerCase() !== normalizedEmail ||
-      checkoutSession.client_reference_id !== userId
+      checkoutSession.client_reference_id !== userId ||
+      purchasedPriceId !== expectedPriceId ||
+      lineItems.data[0]?.quantity !== 1
     ) {
       return res.status(400).json({
         success: false,
@@ -305,7 +361,7 @@ app.post('/payments/checkout-verify', async (req, res) => {
     const userQuery = {
       _id: new ObjectId(userId),
       email: normalizedEmail,
-      role: 'tutor'
+      role: userRole
     }
     const user = await users.findOne(userQuery, {
       projection: { _id: 1, name: 1, email: 1, role: 1 }
@@ -313,7 +369,7 @@ app.post('/payments/checkout-verify', async (req, res) => {
     if (!user) {
       return res.status(404).json({
         success: false,
-        message: 'Tutor account was not found.'
+        message: 'Account was not found.'
       })
     }
 
@@ -323,8 +379,8 @@ app.post('/payments/checkout-verify', async (req, res) => {
       payment_status: checkoutSession.payment_status,
       userName: user.name || '',
       email: normalizedEmail,
-      role: 'tutor',
-      planName: 'Pro',
+      role: userRole,
+      planName: userRole === 'student' ? 'Student Pro' : 'Tutor Pro',
       amountTotal: checkoutSession.amount_total,
       currency: checkoutSession.currency || 'usd',
       transactionId:
@@ -376,11 +432,16 @@ app.post('/payments/checkout-verify', async (req, res) => {
     if (updateResult.matchedCount !== 1) {
       return res.status(404).json({
         success: false,
-        message: 'Tutor account was not found.'
+        message: 'Account was not found.'
       })
     }
 
-    return res.json({ success: true, alreadyVerified, plan: 'pro' })
+    return res.json({
+      success: true,
+      alreadyVerified,
+      plan: 'pro',
+      role: userRole
+    })
   } catch (error) {
     console.error('Payment verification failed:', error)
     return res.status(500).json({
