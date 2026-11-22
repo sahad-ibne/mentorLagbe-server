@@ -74,44 +74,60 @@ const requireInternalApiSecret = (req, res, next) => {
   next()
 }
 
-app.get('/users', async (req, res) => {
-  const cursor = users.find({})
-  const result = await cursor.toArray()
-  res.send(result)
-})
-
 app.get('/', (req, res) => {
   res.send('Hire loop is looping')
 })
 
 const verifyToken = async (req, res, next) => {
-  const authHeader = req.headers.authorization
-  if (!authHeader) {
-    res.status(401).send({ message: 'Unauthorized' })
-    return
+  const authorization = req.get('authorization') || ''
+  const [scheme, token, extra] = authorization.trim().split(/\s+/)
+  if (scheme?.toLowerCase() !== 'bearer' || !token || extra) {
+    return res.status(401).json({ message: 'Unauthorized.' })
   }
-  const token = authHeader.split(' ')[1]
-  if (!token) {
-    res.status(401).send({ message: 'Unauthorized' })
-    return
-  }
-  const query = { token }
-  const session = await sessions.findOne(query)
-  if (!session) {
-    res.status(401).send({ message: 'Unauthorized' })
-    return
-  }
-  const userId = session.userId
 
-  const userQuery = { _id: new ObjectId(userId) }
-  const user = await users.findOne(userQuery)
-  if (!user) {
-    res.status(401).send({ message: 'Unauthorized' })
-    return
+  try {
+    const session = await sessions.findOne({ token })
+    const expiresAt = session?.expiresAt
+      ? new Date(session.expiresAt).getTime()
+      : 0
+    if (!session || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      return res.status(401).json({ message: 'Unauthorized.' })
+    }
+
+    const userId = String(session.userId || '')
+    if (!ObjectId.isValid(userId)) {
+      return res.status(401).json({ message: 'Unauthorized.' })
+    }
+
+    const user = await users.findOne({ _id: new ObjectId(userId) })
+    if (!user) {
+      return res.status(401).json({ message: 'Unauthorized.' })
+    }
+
+    req.user = user
+    req.authSession = session
+    return next()
+  } catch (error) {
+    console.error('Verify session token error:', error)
+    return res.status(500).json({ message: 'Could not verify session.' })
   }
-  req.user = user
-  next()
 }
+
+const requireRole = role => (req, res, next) => {
+  if (String(req.user?.role || '').toLowerCase() !== role) {
+    return res.status(403).json({ message: 'Forbidden.' })
+  }
+  return next()
+}
+
+const verifyStudent = requireRole('student')
+const verifyTutor = requireRole('tutor')
+const verifyAdmin = requireRole('admin')
+
+app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
+  const result = await users.find({}).toArray()
+  res.send(result)
+})
 
 app.get('/platform-stats', async (req, res) => {
   try {
@@ -144,6 +160,25 @@ app.get('/tutions/featured', async (req, res) => {
   } catch (error) {
     console.error('Load featured tuitions error:', error)
     res.status(500).json({ message: 'Could not load featured tuitions.' })
+  }
+})
+
+app.get('/tutions/mine', verifyToken, verifyTutor, async (req, res) => {
+  try {
+    const tutorEmail = String(req.user.email || '')
+      .trim()
+      .toLowerCase()
+    if (!tutorEmail) {
+      return res.status(400).json({ message: 'Tutor email is missing.' })
+    }
+    const result = await tutions
+      .find({ tutorEmail })
+      .sort({ createdAt: -1 })
+      .toArray()
+    return res.json(result)
+  } catch (error) {
+    console.error('Load tutor tuitions error:', error)
+    return res.status(500).json({ message: 'Could not load tutor tuitions.' })
   }
 })
 
@@ -247,7 +282,9 @@ app.get('/payments', requireInternalApiSecret, async (req, res) => {
 })
 
 app.get('/tutions', async (req, res) => {
-  const query = {}
+  const query = isValidInternalApiSecret(req.get('x-internal-api-secret'))
+    ? {}
+    : { approvalStatus: 'approved', isActive: true }
 
   if (req.query.subject) {
     query.subject = {
@@ -486,31 +523,127 @@ app.post('/payments/checkout-verify', async (req, res) => {
   }
 })
 
-app.delete('/tutions/:id', async (req, res) => {
+app.delete('/tutions/:id', verifyToken, verifyTutor, async (req, res) => {
   const id = req.params.id
-  const query = { _id: new ObjectId(id) }
-  const result = await tutions.deleteOne(query)
-  res.send(result)
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).json({ message: 'Invalid tuition ID.' })
+  }
+  const tutorEmail = String(req.user.email || '')
+    .trim()
+    .toLowerCase()
+  const result = await tutions.deleteOne({
+    _id: new ObjectId(id),
+    $or: [{ tutorEmail }, { email: tutorEmail }]
+  })
+  if (result.deletedCount !== 1) {
+    return res.status(404).json({ message: 'Tuition not found.' })
+  }
+  return res.json({ success: true })
 })
 
 // application related api
-app.post('/applications', async (req, res) => {
-  const newApplication = {
-    ...req.body,
-    status: 'pending',
-    createdAt: new Date()
+app.post('/applications', verifyToken, verifyStudent, async (req, res) => {
+  const body = req.body || {}
+  const tuitionId = String(body.tuitionId || '').trim()
+  const phone = String(body.phone || '').trim()
+  const preferredSchedule = String(body.preferredSchedule || '').trim()
+  const learningNote = String(body.learningNote || '').trim()
+  if (
+    !ObjectId.isValid(tuitionId) ||
+    !phone ||
+    phone.length > 40 ||
+    !preferredSchedule ||
+    preferredSchedule.length > 200 ||
+    !learningNote ||
+    learningNote.length > 2000
+  ) {
+    return res.status(400).json({ message: 'Invalid application details.' })
   }
-  const result = await applications.insertOne(newApplication)
-  res.send(result)
+
+  const tuition = await tutions.findOne({
+    _id: new ObjectId(tuitionId),
+    approvalStatus: 'approved',
+    isActive: true
+  })
+  if (!tuition) {
+    return res.status(404).json({
+      message: 'This tuition is not available for applications.'
+    })
+  }
+
+  const studentEmail = String(req.user.email || '')
+    .trim()
+    .toLowerCase()
+  const tutorEmail = String(tuition.tutorEmail || '')
+    .trim()
+    .toLowerCase()
+  if (!studentEmail || !tutorEmail) {
+    return res
+      .status(400)
+      .json({ message: 'Student or tutor email is missing.' })
+  }
+  if (studentEmail === tutorEmail) {
+    return res
+      .status(403)
+      .json({ message: 'You cannot apply to your own tuition.' })
+  }
+
+  const studentId = req.user._id.toString()
+  const existing = await applications.findOne({ tuitionId, studentId })
+  if (existing) {
+    return res.status(409).json({ message: 'You have already applied.' })
+  }
+
+  const result = await applications.insertOne({
+    tuitionId,
+    tuitionTitle: String(tuition.title || ''),
+    tutorName: String(tuition.tutorName || ''),
+    tutorEmail,
+    monthlyFee: Number(tuition.monthlyFee),
+    studentId,
+    studentName: String(req.user.name || ''),
+    studentEmail,
+    phone,
+    preferredSchedule,
+    learningNote,
+    status: 'pending',
+    createdAt: new Date(),
+    updatedAt: new Date()
+  })
+  return res.status(201).json({
+    success: true,
+    applicationId: result.insertedId.toString(),
+    status: 'pending'
+  })
 })
 
-app.get('/applications', async (req, res) => {
-  const query = {}
-  if (req.query.email) {
-    query.studentEmail = req.query.email
+app.get('/applications', verifyToken, async (req, res) => {
+  const role = String(req.user.role || '').toLowerCase()
+  let query = {}
+
+  if (role === 'student') {
+    query = {
+      $or: [
+        { studentId: req.user._id.toString() },
+        { studentEmail: String(req.user.email || '').toLowerCase() }
+      ]
+    }
+  } else if (role === 'tutor') {
+    const tutorEmail = String(req.user.email || '').toLowerCase()
+    const ownedTuitions = await tutions
+      .find(
+        { $or: [{ tutorEmail }, { email: tutorEmail }] },
+        { projection: { _id: 1 } }
+      )
+      .toArray()
+    const tuitionIds = ownedTuitions.map(tuition => tuition._id.toString())
+    query = { tuitionId: { $in: tuitionIds } }
+  } else if (role !== 'admin') {
+    return res.status(403).json({ message: 'Forbidden.' })
   }
+
   const result = await applications.find(query).toArray()
-  res.send(
+  return res.send(
     result.map(application => ({
       ...application,
       status:
@@ -521,12 +654,64 @@ app.get('/applications', async (req, res) => {
   )
 })
 
-app.delete('/applications/:id', async (req, res) => {
+app.patch('/applications/:id', verifyToken, verifyTutor, async (req, res) => {
   const id = req.params.id
-  const query = { _id: new ObjectId(id) }
-  const result = await applications.deleteOne(query)
-  res.send(result)
+  const status = req.body?.status
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).json({ message: 'Invalid application ID.' })
+  }
+  if (!['accepted', 'rejected'].includes(status)) {
+    return res.status(400).json({
+      message: 'Status must be accepted or rejected.'
+    })
+  }
+
+  const tutorEmail = String(req.user.email || '')
+    .trim()
+    .toLowerCase()
+  const ownedTuitions = await tutions
+    .find(
+      { $or: [{ tutorEmail }, { email: tutorEmail }] },
+      { projection: { _id: 1 } }
+    )
+    .toArray()
+  const tuitionIds = ownedTuitions.map(tuition => tuition._id.toString())
+  const result = await applications.updateOne(
+    {
+      _id: new ObjectId(id),
+      tuitionId: { $in: tuitionIds },
+      status: 'pending'
+    },
+    { $set: { status, updatedAt: new Date() } }
+  )
+
+  if (result.matchedCount !== 1) {
+    return res.status(404).json({ message: 'Pending application not found.' })
+  }
+  return res.json({ success: true, status })
 })
+
+app.delete(
+  '/applications/:id',
+  verifyToken,
+  verifyStudent,
+  async (req, res) => {
+    const id = req.params.id
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid application ID.' })
+    }
+    const query = {
+      _id: new ObjectId(id),
+      studentId: req.user._id.toString(),
+      status: 'pending'
+    }
+    const result = await applications.deleteOne(query)
+    if (result.deletedCount !== 1) {
+      return res.status(404).json({ message: 'Pending application not found.' })
+    }
+    return res.json({ success: true })
+  }
+)
 
 app.patch(
   '/tutions/:id/approval',
@@ -568,14 +753,23 @@ app.patch(
   }
 )
 
-app.patch('/tutions/:id', async (req, res) => {
+app.patch('/tutions/:id', verifyToken, verifyTutor, async (req, res) => {
   try {
     const id = req.params.id
     if (!ObjectId.isValid(id)) {
       return res.status(400).json({ message: 'Invalid tuition ID' })
     }
 
-    const filter = { _id: new ObjectId(id) }
+    const tutorEmail = String(req.user.email || '')
+      .trim()
+      .toLowerCase()
+    if (!tutorEmail) {
+      return res.status(400).json({ message: 'Tutor email is missing.' })
+    }
+    const filter = {
+      _id: new ObjectId(id),
+      $or: [{ tutorEmail }, { email: tutorEmail }]
+    }
     const allowedFields = [
       'title',
       'subject',
