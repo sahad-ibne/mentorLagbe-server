@@ -169,6 +169,7 @@ app.post('/payments/checkout-verify', async (req, res) => {
   try {
     const checkoutSession = await stripe.checkout.sessions.retrieve(sessionId)
     const metadata = checkoutSession.metadata || {}
+    const normalizedEmail = email.trim().toLowerCase()
 
     if (
       checkoutSession.status !== 'complete' ||
@@ -177,7 +178,7 @@ app.post('/payments/checkout-verify', async (req, res) => {
       metadata.userRole !== 'tutor' ||
       metadata.plan !== 'pro' ||
       metadata.userId !== userId ||
-      metadata.userEmail?.toLowerCase() !== email.trim().toLowerCase() ||
+      metadata.userEmail?.toLowerCase() !== normalizedEmail ||
       checkoutSession.client_reference_id !== userId
     ) {
       return res.status(400).json({
@@ -188,7 +189,7 @@ app.post('/payments/checkout-verify', async (req, res) => {
 
     const userQuery = {
       _id: new ObjectId(userId),
-      email: email.trim().toLowerCase(),
+      email: normalizedEmail,
       role: 'tutor'
     }
     const user = await users.findOne(userQuery, { projection: { _id: 1 } })
@@ -203,9 +204,10 @@ app.post('/payments/checkout-verify', async (req, res) => {
       sessionId,
       status: checkoutSession.status,
       payment_status: checkoutSession.payment_status,
-      customer_email: checkoutSession.customer_details?.email ||
+      customer_email:
+        checkoutSession.customer_details?.email ||
         checkoutSession.customer_email ||
-        email.trim().toLowerCase(),
+        normalizedEmail,
       userId,
       payment_intent:
         typeof checkoutSession.payment_intent === 'string'
@@ -241,7 +243,6 @@ app.post('/payments/checkout-verify', async (req, res) => {
         planUpdatedAt: new Date()
       }
     })
-
     if (updateResult.matchedCount !== 1) {
       return res.status(404).json({
         success: false,
