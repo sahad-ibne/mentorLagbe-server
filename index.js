@@ -34,11 +34,21 @@ const connectedClient = await connectToMongoDB()
 
 const database = connectedClient.db('mentorLagbe')
 const users = database.collection('user')
+const sessions = database.collection('session')
 const tutions = database.collection('tution')
 const applications = database.collection('applications')
 const payments = database.collection('payments')
 
 await payments.createIndex({ sessionId: 1 }, { unique: true })
+const applicationStatusMigration = await applications.updateMany(
+  { status: { $regex: '^approved$', $options: 'i' } },
+  { $set: { status: 'accepted' } }
+)
+if (applicationStatusMigration.modifiedCount > 0) {
+  console.log(
+    `Migrated ${applicationStatusMigration.modifiedCount} application statuses to accepted.`
+  )
+}
 
 const isValidInternalApiSecret = providedSecret => {
   const expected = process.env.INTERNAL_API_SECRET
@@ -73,6 +83,35 @@ app.get('/users', async (req, res) => {
 app.get('/', (req, res) => {
   res.send('Hire loop is looping')
 })
+
+const verifyToken = async (req, res, next) => {
+  const authHeader = req.headers.authorization
+  if (!authHeader) {
+    res.status(401).send({ message: 'Unauthorized' })
+    return
+  }
+  const token = authHeader.split(' ')[1]
+  if (!token) {
+    res.status(401).send({ message: 'Unauthorized' })
+    return
+  }
+  const query = { token }
+  const session = await sessions.findOne(query)
+  if (!session) {
+    res.status(401).send({ message: 'Unauthorized' })
+    return
+  }
+  const userId = session.userId
+
+  const userQuery = { _id: new ObjectId(userId) }
+  const user = await users.findOne(userQuery)
+  if (!user) {
+    res.status(401).send({ message: 'Unauthorized' })
+    return
+  }
+  req.user = user
+  next()
+}
 
 app.get('/platform-stats', async (req, res) => {
   try {
@@ -160,10 +199,7 @@ app.get('/payments', requireInternalApiSecret, async (req, res) => {
             : payment.paymentDate || payment.createdAt || null
         }
 
-        await payments.updateOne(
-          { _id: payment._id },
-          { $set: stripeDetails }
-        )
+        await payments.updateOne({ _id: payment._id }, { $set: stripeDetails })
         return { ...payment, ...stripeDetails }
       })
     )
@@ -189,8 +225,7 @@ app.get('/payments', requireInternalApiSecret, async (req, res) => {
         return {
           _id: payment._id.toString(),
           userName: payment.userName || user?.name || '',
-          email:
-            payment.email || payment.customer_email || user?.email || '',
+          email: payment.email || payment.customer_email || user?.email || '',
           role: payment.role || user?.role || 'tutor',
           planName: payment.planName || payment.plan || 'Pro',
           amountTotal: payment.amountTotal ?? null,
@@ -328,8 +363,8 @@ app.post('/payments/checkout-verify', async (req, res) => {
       userRole === 'student'
         ? studentProPriceId
         : userRole === 'tutor'
-          ? tutorProPriceId
-          : null
+        ? tutorProPriceId
+        : null
     const lineItems = await stripe.checkout.sessions.listLineItems(sessionId, {
       limit: 2
     })
@@ -475,7 +510,15 @@ app.get('/applications', async (req, res) => {
     query.studentEmail = req.query.email
   }
   const result = await applications.find(query).toArray()
-  res.send(result)
+  res.send(
+    result.map(application => ({
+      ...application,
+      status:
+        String(application.status || '').toLowerCase() === 'approved'
+          ? 'accepted'
+          : application.status
+    }))
+  )
 })
 
 app.delete('/applications/:id', async (req, res) => {
