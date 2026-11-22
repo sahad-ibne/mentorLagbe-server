@@ -58,6 +58,18 @@ app.get('/', (req, res) => {
   res.send('Hire loop is looping')
 })
 
+app.patch('/users/:id/role', async (req, res) => {
+  const id = req.params.id
+  const query = { _id: new ObjectId(id) }
+  const updateDoc = {
+    $set: {
+      role: req.body.role
+    }
+  }
+  const result = await users.updateOne(query, updateDoc)
+  res.send(result)
+})
+
 app.get('/tutions', async (req, res) => {
   const query = {}
 
