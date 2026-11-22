@@ -73,7 +73,18 @@ app.post('/tutions', async (req, res) => {
   const tution = req.body
   const tutorEmail = tution.tutorEmail || tution.email
 
-  if (tutorEmail) {
+  let isPro =
+    (tution.tutorPlan || '').toLowerCase() === 'pro' ||
+    (tution.plan || '').toLowerCase() === 'pro'
+
+  if (!isPro && tutorEmail) {
+    const foundUser = await users.findOne({ email: tutorEmail })
+    if ((foundUser?.plan || '').toLowerCase() === 'pro') {
+      isPro = true
+    }
+  }
+
+  if (!isPro && tutorEmail) {
     const count = await tutions.countDocuments({
       $or: [{ tutorEmail: tutorEmail }, { email: tutorEmail }]
     })
